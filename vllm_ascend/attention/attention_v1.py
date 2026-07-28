@@ -918,7 +918,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
         event = torch.npu.ExternalEvent()
         event.wait(stream)
         event.reset(stream)
-        graph_params.events[num_tokens].append(event)
+        graph_params.events.setdefault(num_tokens, []).append(event)
         attn_params = (
             weak_ref_tensors(query),
             weak_ref_tensors(key),
@@ -948,7 +948,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
             attn_params = attn_params + (None, None, None, None)  # type: ignore
         layer_name = self._graph_metadata_layer_name(layer) if self._use_layer_aware_fia_graph_replay else None
         attn_params = attn_params + (layer_name,)  # type: ignore
-        graph_params.attn_params[num_tokens].append(attn_params)
+        graph_params.attn_params.setdefault(num_tokens, []).append(attn_params)
 
         torch.npu.graph_task_group_begin(stream)
         torch_npu.npu_fused_infer_attention_score.out(
@@ -975,7 +975,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
         output = output.view(num_tokens, self.num_heads, self.head_size)
 
         handle = torch.npu.graph_task_group_end(stream)
-        graph_params.handles[num_tokens].append(handle)
+        graph_params.handles.setdefault(num_tokens, []).append(handle)
         return output, num_tokens
 
     def full_graph_fia_v2(
@@ -1059,8 +1059,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
         event = torch.npu.ExternalEvent()
         event.wait(stream)
         event.reset(stream)
-        graph_params.events[num_tokens].append(event)
-        graph_params.attn_params[num_tokens].append(
+        graph_params.events.setdefault(num_tokens, []).append(event)
+        graph_params.attn_params.setdefault(num_tokens, []).append(
             (
                 weak_ref_tensors(query),
                 weak_ref_tensors(key),
@@ -1101,7 +1101,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
             out=[output, softmax_lse],
         )
         handle = torch.npu.graph_task_group_end(stream)
-        graph_params.handles[num_tokens].append(handle)
+        graph_params.handles.setdefault(num_tokens, []).append(handle)
         return output, num_tokens
 
     def full_graph_pa(
@@ -1135,8 +1135,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
             event = torch.npu.ExternalEvent()
             event.wait(stream)
             event.reset(stream)
-            graph_params.events[num_tokens].append(event)
-            graph_params.attn_params[num_tokens].append(
+            graph_params.events.setdefault(num_tokens, []).append(event)
+            graph_params.attn_params.setdefault(num_tokens, []).append(
                 (
                     weak_ref_tensors(query),
                     weak_ref_tensors(self.key_cache),
@@ -1164,7 +1164,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 workspace=workspace,
             )
             handle = torch.npu.graph_task_group_end(stream)
-            graph_params.handles[num_tokens].append(handle)
+            graph_params.handles.setdefault(num_tokens, []).append(handle)
             return output
 
     def _get_fia_params(self, key: torch.Tensor, value: torch.Tensor, attn_metadata: AscendMetadata, kv_cache=None):

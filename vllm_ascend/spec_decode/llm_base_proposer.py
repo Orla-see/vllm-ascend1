@@ -182,6 +182,10 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
 
         self.pcp_size = self.runner.pcp_size
         self.dcp_size = self.runner.dcp_size
+        self.full_indices = range(
+            self.runner.max_num_tokens * self.pcp_size * self.dcp_size
+            + self.pcp_size * self.dcp_size * self.runner.max_num_reqs
+        )
 
         self.use_sparse = hasattr(vllm_config.model_config.hf_text_config, "index_topk")
 
@@ -748,6 +752,25 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
     ) -> torch.Tensor:
         batch_size = common_attn_metadata.batch_size()
 
+        # [DSD] Per-step draft length. When dynamic speculative decoding is
+        # active, the scheduler sets num_spec_tokens_to_schedule per step;
+        # fall back to the configured upper bound otherwise.
+        # K=0 (DSD disabled drafting for this step) is handled in-place: we
+        # run a 1-token keep-alive forward (_step_k=1) so the draft KV cache
+        # stays in sync, then discard the produced draft and return an empty
+        # tensor. _run_merged_draft's step-0 forward (self.model(**kwargs))
+        # runs unconditionally before the early-exit, so KV advances.
+        _dsd_k0 = False
+        if scheduler_output is not None:
+            _sched_k = scheduler_output.num_spec_tokens_to_schedule
+            if _sched_k > 0:
+                _step_k = _sched_k
+            else:
+                _dsd_k0 = True
+                _step_k = 1  # keep-alive: advance draft KV, drafts discarded
+        else:
+            _step_k = self.num_speculative_tokens
+
         if token_indices_to_sample is None:
             token_indices_to_sample = common_attn_metadata.query_start_loc[1:] - 1
 
@@ -1022,6 +1045,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 "multi_steps_attn_metadata": multi_steps_attn_metadata,
                 "num_tokens": num_tokens,
                 "is_prefill": is_prefill_batch,
+                "_step_k": _step_k,
             }
             runnable = cast(Callable[..., Any], self._runnable)
             run_draft: Callable[[], Any] = partial(runnable, **model_inputs)
@@ -1032,6 +1056,10 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             else:
                 draft_token_ids = run_draft()
                 self._update_full_graph_params_if_needed(forward_context, num_input_tokens, multi_steps_attn_metadata)
+        # K=0: draft KV already advanced by keep-alive forward above; discard drafts.
+        if _dsd_k0:
+            draft_token_ids = draft_token_ids[:, :0]
+
         return draft_token_ids
 
     def compute_draft_token_ids(self, hidden_states: torch.Tensor):
@@ -1059,6 +1087,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         multi_steps_attn_metadata,
         num_tokens,
         is_prefill=None,
+        _step_k=1,
     ) -> torch.Tensor:
         # The lifecycle of `input_ids`, `positions`, `hidden_states` runs through all
         # speculative tokens' proposings. `model_input_ids`, `model_positions` and

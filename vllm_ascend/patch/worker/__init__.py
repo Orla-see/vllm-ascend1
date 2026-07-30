@@ -34,7 +34,14 @@ if HAS_TRITON:
     import vllm_ascend.patch.worker.patch_triton
 
     if _V2_MODEL_RUNNER_SUPPORTED:
-        import vllm_ascend.patch.worker.patch_v2.patch_triton  # noqa
+        # [LOCAL] patch_v2.patch_triton transitively imports
+        # `_compute_global_logsumexp`, which only exists in vllm >= v0.25.0
+        # (MRv2 block verification). GLM-5 MTP runs on MRv1 and does not need
+        # this MRv2 patch; skip it on older vllm instead of failing import.
+        try:
+            import vllm_ascend.patch.worker.patch_v2.patch_triton  # noqa
+        except ImportError:
+            pass
 
 
 import vllm_ascend.patch.worker.patch_process_weights_after_loading  # noqa
@@ -47,7 +54,13 @@ import vllm_ascend.patch.worker.patch_qwen3_next_mtp  # noqa
 
 if not is_310p():
     import vllm_ascend.patch.worker.patch_qwen3_5  # noqa
-    import vllm_ascend.patch.worker.patch_qwen3_dflash  # noqa
+    # [LOCAL] patch_qwen3_dflash references DFlashQwen3ForCausalLM._read_mask_embedding
+    # (added in vllm v0.25.0 by #46104). GLM-5 uses deepseek_mtp, not dflash, so
+    # skip on v0.24.0 where the method is absent.
+    try:
+        import vllm_ascend.patch.worker.patch_qwen3_dflash  # noqa
+    except AttributeError:
+        pass
     import vllm_ascend.patch.worker.patch_qwen3vl  # noqa
 else:
     import vllm_ascend.patch.worker.patch_idex_310  # noqa

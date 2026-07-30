@@ -30,13 +30,7 @@ _STREAM_RESOURCE_ERROR_MARKERS = (
     "insufficient_stream_resources",
     "stream resources are insufficient",
 )
-_STREAM_RESOURCE_GUIDANCE = (
-    "ACL graph capture failed with a known stream-resource exhaustion "
-    "signature. Consider upgrading to a newer HDK/CANN stack, reducing "
-    "cudagraph_capture_sizes, lowering max_cudagraph_capture_size, preferring "
-    "FULL or FULL_DECODE_ONLY for mostly uniform decode workloads, or "
-    "temporarily disabling graph mode to confirm the failure is capture-related."
-)
+_OLD_HDK_CAPTURE_ERROR_MARKERS = ("alloc sq cq fail",)
 
 
 def _is_stream_resource_capture_error(exc: RuntimeError) -> bool:
@@ -47,8 +41,9 @@ def _is_stream_resource_capture_error(exc: RuntimeError) -> bool:
     return has_stream_resource_marker or (has_error_code and "stream resource" in lowered_message)
 
 
-def _raise_stream_resource_capture_error(exc: RuntimeError) -> None:
-    raise RuntimeError(f"{_STREAM_RESOURCE_GUIDANCE}\nOriginal error:\n{exc}") from exc
+def _is_old_hdk_capture_error(exc: RuntimeError) -> bool:
+    message = str(exc).lower()
+    return any(marker in message for marker in _OLD_HDK_CAPTURE_ERROR_MARKERS)
 
 
 @dataclasses.dataclass
@@ -206,8 +201,22 @@ class ACLGraphWrapper:
                             # any other acl graph.
                             output = weak_ref_tensors(output)
                 except RuntimeError as exc:
-                    if _is_stream_resource_capture_error(exc):
-                        _raise_stream_resource_capture_error(exc)
+                    if _is_old_hdk_capture_error(exc):
+                        raise RuntimeError(
+                            "ACL graph capture failed with an old Ascend HDK/CANN stack "
+                            "signature (`Alloc sq cq fail`). Please upgrade Ascend HDK to "
+                            "25.5.1 or later and use the matching CANN stack.\n"
+                            f"Original error:\n{exc}"
+                        ) from exc
+                    elif _is_stream_resource_capture_error(exc):
+                        raise RuntimeError(
+                            "ACL graph capture failed with a known stream-resource exhaustion "
+                            "signature. Consider reducing cudagraph_capture_sizes, lowering "
+                            "max_cudagraph_capture_size, preferring FULL or FULL_DECODE_ONLY for "
+                            "mostly uniform decode workloads, or temporarily disabling graph mode "
+                            "to confirm the failure is capture-related.\n"
+                            f"Original error:\n{exc}"
+                        ) from exc
                     raise
 
             # here we always use weak ref for the workspaces
@@ -288,6 +297,50 @@ def update_full_graph_params(
         draft_attn_metadatas,
     )
 
+class _NumReqsKeyedDict(dict):
+    """Dict that auto-translates num_tokens (int) key to (num_tokens, num_reqs)
+    (tuple) using forward_context.batch_descriptor.num_reqs. For DSD 2-D, this
+    separates graph params for cells with same num_tokens but different num_reqs.
+    Falls back to raw key if translated key not found (for 1-D keys from init)."""
+
+    @staticmethod
+    def _translate(key):
+        if isinstance(key, tuple):
+            return key
+        try:
+            from vllm.forward_context import get_forward_context
+            desc = get_forward_context().batch_descriptor
+            if desc is not None and desc.num_reqs is not None:
+                return (key, desc.num_reqs)
+        except Exception:
+            pass
+        return key
+
+    def __getitem__(self, key):
+        t = self._translate(key)
+        if dict.__contains__(self, t):
+            return dict.__getitem__(self, t)
+        return dict.__getitem__(self, key)
+
+    def __setitem__(self, key, value):
+        dict.__setitem__(self, self._translate(key), value)
+
+    def __contains__(self, key):
+        return dict.__contains__(self, self._translate(key)) or dict.__contains__(self, key)
+
+    def get(self, key, default=None):
+        t = self._translate(key)
+        if dict.__contains__(self, t):
+            return dict.__getitem__(self, t)
+        return dict.get(self, key, default)
+
+    def setdefault(self, key, default=None):
+        t = self._translate(key)
+        if dict.__contains__(self, t):
+            return dict.__getitem__(self, t)
+        # Don't fall back to 1-D for 2-D keys — create the 2-D entry.
+        dict.__setitem__(self, t, default)
+        return default
 
 @dataclass
 class GraphParams:
@@ -305,10 +358,13 @@ def set_graph_params(aclgraph_capture_sizes: list[int]):
     if _graph_params is not None:
         raise ValueError("Graph parameters have already been set!")
     _graph_params = GraphParams(
-        {size: [] for size in aclgraph_capture_sizes},
-        {size: None for size in aclgraph_capture_sizes},
-        {size: [] for size in aclgraph_capture_sizes},
-        {size: [] for size in aclgraph_capture_sizes},
+        _NumReqsKeyedDict({size: [] for size in aclgraph_capture_sizes}),
+        _NumReqsKeyedDict({size: None for size in aclgraph_capture_sizes}),
+        _NumReqsKeyedDict({size: [] for size in aclgraph_capture_sizes}),
+        _NumReqsKeyedDict({size: [] for size in aclgraph_capture_sizes}),
+        _NumReqsKeyedDict({size: [] for size in aclgraph_capture_sizes}),
+        _NumReqsKeyedDict({size: [] for size in aclgraph_capture_sizes}),
+        _NumReqsKeyedDict({size: [] for size in aclgraph_capture_sizes}),
     )
 
 
@@ -330,10 +386,13 @@ def set_draft_graph_params(aclgraph_capture_sizes: list[int]):
     if _draft_graph_params is not None:
         raise ValueError("DraftGraph parameters have already been set!")
     _draft_graph_params = GraphParams(
-        {size: [] for size in aclgraph_capture_sizes},
-        {size: None for size in aclgraph_capture_sizes},
-        {size: [] for size in aclgraph_capture_sizes},
-        {size: [] for size in aclgraph_capture_sizes},
+        _NumReqsKeyedDict({size: [] for size in aclgraph_capture_sizes}),
+        _NumReqsKeyedDict({size: None for size in aclgraph_capture_sizes}),
+        _NumReqsKeyedDict({size: [] for size in aclgraph_capture_sizes}),
+        _NumReqsKeyedDict({size: [] for size in aclgraph_capture_sizes}),
+        _NumReqsKeyedDict({size: [] for size in aclgraph_capture_sizes}),
+        _NumReqsKeyedDict({size: [] for size in aclgraph_capture_sizes}),
+        _NumReqsKeyedDict({size: [] for size in aclgraph_capture_sizes}),
     )
 
 
@@ -355,10 +414,13 @@ def set_draft_graph_prefill_params(aclgraph_capture_sizes: list[int]):
     if _draft_graph_prefill_params is not None:
         raise ValueError("DraftGraph preill parameters have already been set!")
     _draft_graph_prefill_params = GraphParams(
-        {size: [] for size in aclgraph_capture_sizes},
-        {size: None for size in aclgraph_capture_sizes},
-        {size: [] for size in aclgraph_capture_sizes},
-        {size: [] for size in aclgraph_capture_sizes},
+        _NumReqsKeyedDict({size: [] for size in aclgraph_capture_sizes}),
+        _NumReqsKeyedDict({size: None for size in aclgraph_capture_sizes}),
+        _NumReqsKeyedDict({size: [] for size in aclgraph_capture_sizes}),
+        _NumReqsKeyedDict({size: [] for size in aclgraph_capture_sizes}),
+        _NumReqsKeyedDict({size: [] for size in aclgraph_capture_sizes}),
+        _NumReqsKeyedDict({size: [] for size in aclgraph_capture_sizes}),
+        _NumReqsKeyedDict({size: [] for size in aclgraph_capture_sizes}),
     )
 
 

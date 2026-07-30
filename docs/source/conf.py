@@ -1,40 +1,44 @@
-#
-# Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
-# Copyright 2023 The vLLM team.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-# This file is a part of the vllm-ascend project.
-# Adapted from vllm-project/vllm/docs/source/conf.py
-#
+"""Documentation configuration shim.
 
-# -- Path setup --------------------------------------------------------------
+The legacy Sphinx ``conf.py`` exposed version variables as JSON when
+invoked as a script, so tooling like the ``labeled_doctest`` workflow
+and ``tests/e2e/common.sh`` could extract them with ``jq``.
 
-# If extensions (or modules to document with autodoc) are in another directory,
-# add these directories to sys.path here. If the directory is relative to the
-# documentation root, use os.path.abspath to make it absolute, like shown here.
-#
+After the migration to mkdocs the source of truth for those variables
+is the ``extra:`` block of ``mkdocs.yml``. This file is a thin shim
+that re-exports them in the same JSON shape, so existing tooling keeps
+working without modification.
+
+Output schema (printed to stdout)::
+
+    {
+        "vllm_version": "vX.Y.Z",
+        "vllm_ascend_version": "vX.Y.ZrcN",
+        "pip_vllm_version": "X.Y.Z",
+        "pip_vllm_ascend_version": "X.Y.ZrcN",
+        "cann_image_tag": "...",
+        "main_python_version": "...",
+        "main_cann_version": "...",
+        "main_pytorch_torch_npu_version": "...",
+        "main_triton_ascend_version": "...",
+        "main_vllm_commit": "<sha>",
+        "main_vllm_tag": "<tag>",
+    }
+
+Edit version variables in ``mkdocs.yml`` (``extra:`` block), not here.
+
+Only the standard library is used so this script can run in minimal
+environments (e.g. CI containers that do not have ``mkdocs``,
+``pyyaml`` or ``pyyaml_env_tag`` installed).
+"""
+
 import json
 import os
-import sys
+import re
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-
-# -- Project information -----------------------------------------------------
-
-project = "vllm-ascend"
-copyright = "2025, vllm-ascend team"
-author = "the vllm-ascend team"
+REPO_ROOT = Path(__file__).resolve().parents[2]
+MKDOCS_YML = REPO_ROOT / "mkdocs.yml"
 
 # The full version, including alpha/beta/rc tags
 release = "0.23.0rc1"
@@ -178,4 +182,4 @@ if READTHEDOCS_VERSION_TYPE == "tag":
         os.remove(header_file)
 
 if __name__ == "__main__":
-    print(json.dumps(myst_substitutions))
+    main()

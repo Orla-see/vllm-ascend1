@@ -234,3 +234,9 @@ def _replace_full_keys_with_dsd_2d_catalog(self, uniform_decode_query_len: int):
 
 CudagraphDispatcher._create_padded_batch_descriptor = _create_padded_batch_descriptor
 CudagraphDispatcher.initialize_cudagraph_keys = initialize_cudagraph_keys
+
+# DSD 2-D FULL catalog requires FULL mode. vllm base forcibly downgrades
+# FULL_AND_PIECEWISE → PIECEWISE when DSD is active, overriding the user
+# configuration. Disable this override so FULL mode can be used with DSD.
+from vllm.config.vllm import VllmConfig
+VllmConfig._maybe_override_dynamic_sd_cudagraph_mode = lambda self: None

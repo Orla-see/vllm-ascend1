@@ -348,6 +348,9 @@ class GraphParams:
     workspaces: dict[int, torch.Tensor]
     handles: dict[int, list[torch_npu._C._NPUTaskGroupHandle]]
     attn_params: dict[int, list[tuple]]
+    conv1d_params: dict[int, list[tuple]]  # for causal conv1d params
+    conv1d_handles: dict[int, list[torch_npu._C._NPUTaskGroupHandle]]  # for causal conv1d params handles
+    conv1d_events: dict[int, list[torch.npu.ExternalEvent]]  # for causal conv1d params events
 
 
 _graph_params: GraphParams | None = None

@@ -3353,7 +3353,7 @@ class NPUModelRunner(GPUModelRunner):
         # it only happens for cudagraph_runtime_mode=FULL.
         return force_attention or cudagraph_runtime_mode == CUDAGraphMode.FULL
 
-    @torch.inference_mode()
+    # @torch.inference_mode()
     def _warmup_and_capture(
         self,
         desc: BatchDescriptor,
@@ -3378,7 +3378,8 @@ class NPUModelRunner(GPUModelRunner):
             )
         finally:
             self._dsd_capture_num_reqs = None
-
+            
+    @torch.inference_mode()
     def _dummy_run(
         self,
         num_tokens: int,

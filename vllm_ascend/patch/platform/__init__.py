@@ -46,6 +46,9 @@ if os.getenv("DYNAMIC_EPLB", "false").lower() in ("true", "1") or os.getenv("EXP
     import vllm_ascend.patch.platform.patch_multiproc_executor  # noqa
 
 import vllm_ascend.patch.platform.patch_balance_schedule  # noqa
+# DSD FULL graph + DP (after balance, which installs the always-on
+# BalanceScheduler that patch_dsd_dp monkey-patches).
+import vllm_ascend.patch.platform.patch_dsd_dp  # noqa
 
 import vllm_ascend.patch.platform.patch_kv_cache_coordinator  # noqa
 import vllm_ascend.patch.platform.patch_speculative_config  # noqa

@@ -62,7 +62,6 @@ def _create_padded_batch_descriptor(
             # 1. Exact cell: bs on the step-2 grid -> (nt, bs) is a catalog cell.
             exact_desc = _mk(num_tokens, actual_bs, True)
             if exact_desc in full_keys:
-                hit = "exact"
                 desc = exact_desc
             else:
                 # 2. Pad up to the smallest captured bs' >= actual_bs whose
@@ -76,12 +75,6 @@ def _create_padded_batch_descriptor(
                         cand = _mk(bs_pad * query_len, bs_pad, True)
                         if cand in full_keys:
                             desc = cand
-                            hit = "pad"
-                if desc is None:
-                    hit = "piecewise"
-
-            print(f"[DEBUG-2D] nt={num_tokens} bs={actual_bs} ql={query_len} "
-                  f"hit={hit}")
 
             if desc is not None:
                 return desc
@@ -119,12 +112,12 @@ def _dsd_2d_cells(self, uniform_decode_query_len: int):
     spec = self.vllm_config.speculative_config
     max_num_seqs = self.vllm_config.scheduler_config.max_num_seqs
     max_cg = self.compilation_config.max_cudagraph_capture_size or 0
-    # Each DSD table entry is [bs_start, bs_end, K]. Keep only K>0 tiers (K=0
-    # means no speculation -> not a spec-decode batch, no graph).
+    # Each DSD table entry is [bs_start, bs_end, K]. K=0 is plain decode
+    # (ql=1) -- still capture a graph cell for it (no speculation, but
+    # graphified decode), so no tier is filtered out.
     table = [
         (start, end, k)
         for start, end, k in (spec.num_speculative_tokens_per_batch_size or [])
-        if k > 0
     ]
     # Distinct K values, descending. Lower-bs tiers are assumed to have higher K.
     all_ks = sorted({k for _, _, k in table}, reverse=True)
@@ -213,9 +206,6 @@ def _replace_full_keys_with_dsd_2d_catalog(self, uniform_decode_query_len: int):
         self._dsd_bs_by_ql.setdefault(nt // nr, []).append(nr)
     for ql in self._dsd_bs_by_ql:
         self._dsd_bs_by_ql[ql].sort()
-    print(f"[DEBUG-2D] DSD FULL catalog: {len(dsd_cells)} cells = "
-          f"{sorted(dsd_cells)}")
-    print(f"[DEBUG-2D] DSD bs grid per ql: {self._dsd_bs_by_ql}")
     # Replace the 1-D FULL keys (built by upstream) with the 2-D cells.
     self.cudagraph_keys[CUDAGraphMode.FULL] = set()
     for num_tokens, num_reqs in dsd_cells:

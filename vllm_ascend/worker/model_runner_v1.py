@@ -18,6 +18,7 @@
 #
 
 import logging
+import bisect
 import math
 import sys
 import time
@@ -761,7 +762,7 @@ class NPUModelRunner(GPUModelRunner):
         spec = self.speculative_config
         if spec is not None and spec.uses_dynamic_speculative_decoding():
             dsd_table = spec.num_speculative_tokens_per_batch_size or []
-            candidate_qls = sorted({k + 1 for _, _, k in dsd_table if k > 0})
+            candidate_qls = sorted({k + 1 for _, _, k in dsd_table})
         else:
             candidate_qls = (self.uniform_decode_query_len,)
         for ql in candidate_qls:
@@ -812,9 +813,6 @@ class NPUModelRunner(GPUModelRunner):
             )
         else:
             # Mixed-batch case: num_reqs must equal num_reqs_padded
-            if query_len is None and num_reqs != num_reqs_padded:
-                print(f"[DEBUG-2D] pad_fia mixed: nt={num_tokens_padded} "
-                      f"num_reqs={num_reqs} num_reqs_padded={num_reqs_padded}")
             assert num_reqs == num_reqs_padded
 
             # Do not insert if the last value already equals the num_tokens
@@ -2914,6 +2912,40 @@ class NPUModelRunner(GPUModelRunner):
             num_tokens, intermediate_tensors, sync_self
         )
 
+    def _dsd_dp_common_cell(
+        self,
+        cudagraph_mode: CUDAGraphMode,
+        num_tokens: int,
+        num_reqs: int,
+        num_tokens_padded: int,
+        max_tokens_across_dp: int,
+    ) -> tuple[int | None, int]:
+        """DSD + DP: round num_reqs up to a common captured FULL cell so all DP
+        ranks replay the same graph (the captured cross-DP MoE all-to-all needs
+        a consistent shape).
+
+        The DSD catalog is 2-D ((num_tokens, num_reqs)) and each rank's
+        num_reqs differs. With ql uniform across ranks (scheduler K-align in
+        patch_dsd_dp), the DP-wide max num_reqs is ``max_tokens_across_dp //
+        ql``; round it up to the smallest captured bs >= that so every rank
+        lands on the same cell ``(max_bs_pad * ql, max_bs_pad)``.
+
+        Returns (max_bs_pad, num_tokens_padded_out); max_bs_pad is None (and
+        num_tokens_padded_out == num_tokens_padded) when no common cell applies
+        -- non-FULL, non-uniform batch, or no captured grid for this ql.
+        """
+        if (cudagraph_mode == CUDAGraphMode.FULL
+                and num_reqs > 0 and num_tokens % num_reqs == 0):
+            ql = num_tokens // num_reqs
+            bs_grid = self.cudagraph_dispatcher._dsd_bs_by_ql.get(ql)
+            if bs_grid:
+                max_bs = max_tokens_across_dp // ql
+                idx = bisect.bisect_left(bs_grid, max_bs)
+                if idx < len(bs_grid):
+                    max_bs_pad = bs_grid[idx]
+                    return max_bs_pad, max_bs_pad * ql
+        return None, num_tokens_padded
+
     def _determine_batch_execution_and_padding(
         self,
         num_tokens: int,
@@ -2954,11 +2986,15 @@ class NPUModelRunner(GPUModelRunner):
         has_lora = num_active_loras > 0 if force_has_lora is None else force_has_lora
 
         # ruff: noqa: E731
-        def dispatch_cudagraph(num_tokens, disable_full=False, valid_modes=None):
+        def dispatch_cudagraph(num_tokens, disable_full=False, valid_modes=None,
+                               dsd_num_reqs=None):
             if force_eager:
                 return (CUDAGraphMode.NONE, BatchDescriptor(num_tokens_padded))
 
-            self.cudagraph_dispatcher._dsd_num_reqs = num_reqs
+            # DSD + DP: re-dispatch may override with the DP-aligned max_bs'
+            # (common cell) instead of the local num_reqs.
+            self.cudagraph_dispatcher._dsd_num_reqs = (
+                dsd_num_reqs if dsd_num_reqs is not None else num_reqs)
             return self.cudagraph_dispatcher.dispatch(
                 num_tokens=num_tokens,
                 has_lora=has_lora,
@@ -2991,14 +3027,28 @@ class NPUModelRunner(GPUModelRunner):
             if num_tokens_across_dp is not None:
                 dp_rank = self.parallel_config.data_parallel_rank
                 num_tokens_padded = int(num_tokens_across_dp[dp_rank].item())
-                # Re-dispatch with DP padding
+                dsd_nr, num_tokens_padded = self._dsd_dp_common_cell(
+                    synced_cudagraph_mode, num_tokens, num_reqs,
+                    num_tokens_padded, int(num_tokens_across_dp.max().item()))
+
+                if num_tokens_padded != int(num_tokens_across_dp[dp_rank].item()):
+                    num_tokens_across_dp = torch.full(
+                        (self.dp_size,), num_tokens_padded, dtype=torch.int32)
+
                 cudagraph_mode, batch_descriptor = dispatch_cudagraph(
                     num_tokens_padded,
                     valid_modes={synced_cudagraph_mode},
+                    dsd_num_reqs=dsd_nr,
                 )
                 # Assert to make sure the agreed upon token count is correct otherwise
                 # num_tokens_across_dp will no-longer be valid
                 assert batch_descriptor.num_tokens == num_tokens_padded
+
+                _across_dp_rank = int(num_tokens_across_dp[dp_rank].item())
+                assert num_tokens_padded == _across_dp_rank, (
+                    f"DSD-DP nt desync: rank{dp_rank} "
+                    f"num_tokens_padded={num_tokens_padded} "
+                    f"across_dp[rank]={_across_dp_rank} mode={cudagraph_mode}")
         cudagraph_stats = None
         if self.vllm_config.observability_config.cudagraph_metrics:
             cudagraph_stats = CUDAGraphStat(
@@ -3007,11 +3057,6 @@ class NPUModelRunner(GPUModelRunner):
                 num_paddings=batch_descriptor.num_tokens - num_tokens,
                 runtime_mode=str(cudagraph_mode),
             )
-
-        if cudagraph_mode == CUDAGraphMode.NONE:
-            print(f"[DEBUG-2D] EAGER: nt={num_tokens} padded={batch_descriptor.num_tokens} "
-                  f"num_reqs={num_reqs} is_all_decode={is_all_decode} "
-                  f"uniform_decode={uniform_decode} max_sched={max_num_scheduled_tokens}")
 
         return (
             cudagraph_mode,
@@ -3353,7 +3398,6 @@ class NPUModelRunner(GPUModelRunner):
         # it only happens for cudagraph_runtime_mode=FULL.
         return force_attention or cudagraph_runtime_mode == CUDAGraphMode.FULL
 
-    # @torch.inference_mode()
     def _warmup_and_capture(
         self,
         desc: BatchDescriptor,
@@ -3378,7 +3422,7 @@ class NPUModelRunner(GPUModelRunner):
             )
         finally:
             self._dsd_capture_num_reqs = None
-            
+
     @torch.inference_mode()
     def _dummy_run(
         self,

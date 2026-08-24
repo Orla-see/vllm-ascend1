@@ -293,6 +293,51 @@ def update_full_graph_params(
     )
 
 
+class _NumReqsKeyedDict(dict):
+    """Dict that auto-translates num_tokens (int) key to (num_tokens, num_reqs)
+    (tuple) using forward_context.batch_descriptor.num_reqs. For DSD 2-D, this
+    separates graph params for cells with same num_tokens but different num_reqs.
+    Falls back to raw key if translated key not found (for 1-D keys from init)."""
+
+    @staticmethod
+    def _translate(key):
+        if isinstance(key, tuple):
+            return key
+        try:
+            from vllm.forward_context import get_forward_context
+            desc = get_forward_context().batch_descriptor
+            if desc is not None and desc.num_reqs is not None:
+                return (key, desc.num_reqs)
+        except Exception:
+            pass
+        return key
+
+    def __getitem__(self, key):
+        t = self._translate(key)
+        if dict.__contains__(self, t):
+            return dict.__getitem__(self, t)
+        return dict.__getitem__(self, key)
+
+    def __setitem__(self, key, value):
+        dict.__setitem__(self, self._translate(key), value)
+
+    def __contains__(self, key):
+        return dict.__contains__(self, self._translate(key)) or dict.__contains__(self, key)
+
+    def get(self, key, default=None):
+        t = self._translate(key)
+        if dict.__contains__(self, t):
+            return dict.__getitem__(self, t)
+        return dict.get(self, key, default)
+
+    def setdefault(self, key, default=None):
+        t = self._translate(key)
+        if dict.__contains__(self, t):
+            return dict.__getitem__(self, t)
+        dict.__setitem__(self, t, default)
+        return default
+
+
 @dataclass
 class GraphParams:
     events: dict[int, list[torch.npu.ExternalEvent]]
@@ -306,10 +351,10 @@ GraphParamsByLoRA = dict[bool, GraphParams]
 
 def _new_graph_params(aclgraph_capture_sizes: list[int]) -> GraphParams:
     return GraphParams(
-        {size: [] for size in aclgraph_capture_sizes},
-        {size: None for size in aclgraph_capture_sizes},
-        {size: [] for size in aclgraph_capture_sizes},
-        {size: [] for size in aclgraph_capture_sizes},
+        _NumReqsKeyedDict({size: [] for size in aclgraph_capture_sizes}),
+        _NumReqsKeyedDict({size: None for size in aclgraph_capture_sizes}),
+        _NumReqsKeyedDict({size: [] for size in aclgraph_capture_sizes}),
+        _NumReqsKeyedDict({size: [] for size in aclgraph_capture_sizes}),
     )
 
 

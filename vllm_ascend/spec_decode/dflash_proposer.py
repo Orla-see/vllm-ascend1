@@ -73,19 +73,21 @@ class AscendDflashProposer(AscendEagleProposer):
         long_seq_metadata=None,
         num_prefill_reqs=0,
         num_decode_reqs=0,
+        _step_k: int = None,
     ) -> tuple[int, torch.Tensor, CommonAttentionMetadata, tuple[Any, Any] | None]:
         # DFlash cross-attention: context K/V from target hidden states,
         # Q from query embeddings (bonus + mask tokens).
         batch_size = cad.num_reqs
         num_context = target_token_ids.shape[0]
-        num_query_per_req = 1 + self.num_speculative_tokens
+        _k = _step_k if _step_k is not None else self.num_speculative_tokens
+        num_query_per_req = 1 + _k
         num_query_total = batch_size * num_query_per_req
 
         self._dflash_num_context = num_context
         self._dflash_hidden_states[:num_context] = target_hidden_states
 
         token_indices_to_sample = torch.empty(
-            batch_size * self.num_speculative_tokens,
+            batch_size * _k,
             dtype=torch.int32,
             device=self.device,
         )
@@ -115,7 +117,7 @@ class AscendDflashProposer(AscendEagleProposer):
             parallel_drafting_token_id=self.parallel_drafting_token_id,
             block_size=self.kernel_block_size,
             num_query_per_req=num_query_per_req,
-            num_speculative_tokens=self.num_speculative_tokens,
+            num_speculative_tokens=_k,
             total_input_tokens=num_context,
             batch_size=batch_size,
             HAS_NUM_REJECTED=has_num_rejected,

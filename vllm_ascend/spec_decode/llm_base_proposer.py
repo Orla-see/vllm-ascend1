@@ -1021,6 +1021,15 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
     ) -> torch.Tensor:
         batch_size = common_attn_metadata.batch_size()
 
+        # DSD: resolve dynamic K from scheduler; K=0 means keep-alive forward
+        _scheduled_k = (
+            scheduler_output.num_spec_tokens_to_schedule
+            if scheduler_output is not None
+            else self.num_speculative_tokens
+        )
+        _dsd_k0 = _scheduled_k == 0
+        _step_k = _scheduled_k if _scheduled_k > 0 else self.num_speculative_tokens
+
         if token_indices_to_sample is None:
             token_indices_to_sample = common_attn_metadata.query_start_loc[1:] - 1
 
@@ -1052,6 +1061,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             long_seq_metadata=long_seq_metadata,
             num_prefill_reqs=num_prefill_reqs,
             num_decode_reqs=num_decode_reqs,
+            _step_k=_step_k,
         )
         assert self.runner is not None
         dcp_manager = getattr(self.runner, "dcp_manager", None)
@@ -1231,7 +1241,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         should_update_next_steps = not self.parallel_drafting and (self.dcp_size == 1 or dcp_mtp_inputs is not None)
         if should_update_next_steps:
             # Copy the old attn_metadata and update
-            for draft_index in range(1, self.num_speculative_tokens):
+            for draft_index in range(1, _step_k):
                 per_layer_attn_metadata = dict()
                 for attn_group in self.draft_attn_groups:
                     common_attn_metadata, attn_metadata = self.attn_update_stack_num_spec_norm(
@@ -1280,6 +1290,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 "multi_steps_attn_metadata": multi_steps_attn_metadata,
                 "num_tokens": num_tokens,
                 "is_prefill": is_prefill_batch,
+                "_step_k": _step_k,
             }
             runnable = cast(Callable[..., Any], self._runnable)
             run_draft: Callable[[], Any] = partial(runnable, **model_inputs)
@@ -1290,6 +1301,8 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             else:
                 draft_token_ids = run_draft()
                 self._update_full_graph_params_if_needed(forward_context, num_input_tokens, multi_steps_attn_metadata)
+        if _dsd_k0:
+            draft_token_ids = draft_token_ids[:, :0]
         return draft_token_ids
 
     def compute_draft_token_ids(self, hidden_states: torch.Tensor):
@@ -1317,7 +1330,9 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         multi_steps_attn_metadata,
         num_tokens,
         is_prefill=None,
+        _step_k: int | None = None,
     ) -> torch.Tensor:
+        _step_k = _step_k if _step_k is not None else self.num_speculative_tokens
         # The lifecycle of `input_ids`, `positions`, `hidden_states` runs through all
         # speculative tokens' proposings. `model_input_ids`, `model_positions` and
         # `model_hidden_states` represent the speculative model inputs.
@@ -1439,8 +1454,8 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             if self.method == "dspark":
                 return draft_token_ids[:, 1:]
             else:
-                # [batch_size, 1]
-                return draft_token_ids.view(-1, self.num_speculative_tokens)
+                # [batch_size, _step_k]
+                return draft_token_ids.view(-1, _step_k)
 
         # The logits are split and then merged only when lmhead_tp_enable() is enabled.
         # As a result, the batch size length becomes the actual length 32.
@@ -1452,7 +1467,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
 
         # Generate the remaining draft tokens.
         draft_token_ids_tensor = torch.zeros(
-            (self.num_speculative_tokens, *draft_token_ids.shape), dtype=draft_token_ids.dtype, device=self.device
+            (_step_k, *draft_token_ids.shape), dtype=draft_token_ids.dtype, device=self.device
         )
         draft_token_ids_tensor[0] = draft_token_ids
         if self.uses_mrope:
@@ -1468,7 +1483,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         _EXTRA_CTX.num_tokens = input_batch_size
         _EXTRA_CTX.num_accept_tokens = batch_size
 
-        for draft_index in range(self.num_speculative_tokens - 1):
+        for draft_index in range(_step_k - 1):
             # Reset MOE layer index for each draft step iteration
             forward_context = get_forward_context()
             if forward_context is not None:
@@ -1599,6 +1614,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         long_seq_metadata=None,
         num_prefill_reqs=0,
         num_decode_reqs=0,
+        _step_k: int | None = None,
     ) -> tuple[int, torch.Tensor, CommonAttentionMetadata, tuple[Any, Any] | None]:
         if not self.needs_extra_input_slots:
             # Default EAGLE pathway: no reshaping of input tensors needed.

@@ -84,7 +84,7 @@ def _triton_rope(
         # m of this program instance
         # ####################################################################
         cos_offsets = tl.arange(0, pad_rope_dim // 2)
-        sin_offsets = tl.arange(pad_rope_dim // 2, pad_rope_dim)
+        sin_offsets = cos_offsets + (rope_dim // 2)
         cos_mask = cos_offsets < (rope_dim // 2)
         if USE_COS_SIN:
             pos_idx = tl.load(pos_ptr + row_idx).to(tl.int64)
@@ -209,7 +209,7 @@ def _triton_rope_siso(
         # m of this program instance
         # ####################################################################
         cos_offsets = tl.arange(0, pad_rope_dim // 2)
-        sin_offsets = tl.arange(pad_rope_dim // 2, pad_rope_dim)
+        sin_offsets = cos_offsets + (rope_dim // 2)
         cos_mask = cos_offsets < (rope_dim // 2)
         if USE_COS_SIN:
             pos_idx = tl.load(pos_ptr + row_idx).to(tl.int64)
@@ -277,7 +277,7 @@ def rope_forward_triton(
         BLOCK_SIZE_HEAD = 32
     # Large head_dim RoPE can overflow UB with the default tile on A2/A3.
     # Keep the original tile for common head_dim models.
-    large_head_dim_threshold, large_head_block_size = 256, 16
+    large_head_dim_threshold, large_head_block_size = 192, 16
     if head_dim >= large_head_dim_threshold:
         BLOCK_SIZE_HEAD = min(BLOCK_SIZE_HEAD, large_head_block_size)
     num_vectorcore = get_vectorcore_num()

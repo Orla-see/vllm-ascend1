@@ -140,6 +140,9 @@ def _dsd_2d_cells(self, uniform_decode_query_len: int):
         # Capture own k + every strictly-lower k (reachable as K_prev when bs
         # decreases out of a higher-bs tier that uses that lower k).
         ks = [k for k in all_ks if k <= k_own]
+        if k_own == 0:
+            # K=0 keep-alive drafts run at ql=2; capture those cells too.
+            ks = ks + [1]
         bs_lo = max(start, 1)
         bs_hi = min(end, max_num_seqs)
         if bs_hi < bs_lo:
@@ -150,13 +153,20 @@ def _dsd_2d_cells(self, uniform_decode_query_len: int):
             # dispatch gate. Align the bs grid so bs*qlen is always a TP
             # multiple (step = TP // gcd(qlen, TP)), making SP padding a no-op.
             sp_on = enable_sp(self.vllm_config)
+            # per-tier step: fine grid for the highest-K (win-window) tier, coarse elsewhere
             step = (self.vllm_config.parallel_config.tensor_parallel_size
                     // math.gcd(qlen, self.vllm_config.parallel_config.tensor_parallel_size)
-                    ) if sp_on else _DSD_BS_STEP
+                    ) if sp_on else (2 if k_own == max(all_ks) else 8)
             bs_start = ((bs_lo + step - 1) // step) * step
             bs_vals = list(range(bs_start, bs_hi + 1, step))
             if not bs_vals or bs_vals[-1] != bs_hi:
-                bs_vals.append(bs_hi)
+                # SP rejects num_tokens that is not a TP multiple. bs_hi for a
+                # lower-K reachability grid can violate it (e.g. bs=63, ql=6);
+                # drop the cell, runtime dispatch never lands there.
+                if sp_on and (bs_hi * qlen) % self.vllm_config.parallel_config.tensor_parallel_size != 0:
+                    pass
+                else:
+                    bs_vals.append(bs_hi)
             for bs in bs_vals:
                 add(bs * qlen, bs)
     return cells

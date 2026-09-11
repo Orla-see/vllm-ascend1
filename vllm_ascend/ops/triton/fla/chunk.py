@@ -103,15 +103,15 @@ def chunk_gated_delta_rule_fwd(
     # _compact_empty_segments).  chunk_indices_chunk64 is already compact-
     # ranked and is reused as-is; only cu_seqlens / initial_state need
     # compacting.
-    if prebuilt_meta is not None and hasattr(prebuilt_meta, "keep_meta"):
+    if prebuilt_meta is not None and hasattr(prebuilt_meta, "keep_idx"):
         cu_seqlens_kern = cu_seqlens_host if prebuilt_meta.cu_seqlens_kern is None else prebuilt_meta.cu_seqlens_kern
-        keep_meta = prebuilt_meta.keep_meta
+        keep_idx = prebuilt_meta.keep_idx
         initial_state_kern = (
-            initial_state[keep_meta] if initial_state is not None and keep_meta is not None else initial_state
+            initial_state.index_select(0, keep_idx) if initial_state is not None and keep_idx is not None else initial_state
         )
     else:
         cu_seqlens_kern, initial_state_kern = cu_seqlens_host, initial_state
-        keep_meta = None
+        keep_idx = None
     h, v_new, final_state = torch.ops._C_ascend.chunk_gated_delta_rule_fwd_h(
         k_ascendc,
         w_ascendc,
@@ -127,12 +127,12 @@ def chunk_gated_delta_rule_fwd(
         use_exp2=False,
         transpose_state_layout=False,
     )
-    if keep_meta is not None:
+    if keep_idx is not None:
         # Scatter the compacted final_state back to the original [N, H, K, V]
         # layout the PCP state recursion expects; empty segments keep their
         # initial state.
         _fs_full = initial_state.clone()
-        _fs_full[keep_meta] = final_state
+        _fs_full.index_copy_(0, keep_idx, final_state)
         final_state = _fs_full
 
     if get_pcp_group().world_size > 1:

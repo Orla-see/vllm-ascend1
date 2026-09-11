@@ -91,6 +91,7 @@ class GDNChunkedPrefillMetadata:
     num_decodes: int
     cu_seqlens_kern: tuple[int, ...] | None = None
     keep_meta: torch.Tensor | None = None
+    keep_idx: torch.Tensor | None = None
 
 
 @dataclass
@@ -145,28 +146,29 @@ def _build_actual_seq_lengths(
 def _compact_empty_segments(cu_seqlens_host, initial_state, device=None):
     """Drop zero-length segments so AscendC fwd_h/fwd_o indexing lines up.
 
-    Returns ``(cu_seqlens_kern, initial_state_kern, keep_meta)``:
+    Returns ``(cu_seqlens_kern, initial_state_kern, keep_meta, keep_idx)``:
     cu_seqlens / initial_state with empty segments removed, plus a bool
     mask (None when nothing was removed).  The compacted ``final_state``
     must be scattered back via ``keep_meta`` (empty segments keep their
-    initial state).
-
-    When *device* is given, ``keep_meta`` is moved to that device so that
-    callers can index NPU tensors without an extra host→device sync.
+    initial state).  ``keep_idx`` holds the kept-row positions as int64
+    indices so consumers use index_select / index_copy instead of boolean
+    mask indexing.
     """
     if cu_seqlens_host is None:
-        return None, initial_state, None
+        return None, initial_state, None, None
     cu = torch.tensor(cu_seqlens_host, dtype=torch.int64)
     keep = (cu[1:] - cu[:-1]) > 0
     if bool(keep.all()):
-        return cu_seqlens_host, initial_state, None
+        return cu_seqlens_host, initial_state, None, None
     # Compute compact cu_seqlens while keep is still on CPU (cu is CPU-only).
     cu_kern = torch.cat([cu[:1], cu[1:][keep]]).tolist()
+    keep_idx = keep.nonzero(as_tuple=True)[0]
     # Move keep to device only for indexing device-side tensors.
     if device is not None:
         keep = keep.to(device)
-    st_kern = initial_state[keep] if initial_state is not None else None
-    return cu_kern, st_kern, keep
+        keep_idx = keep_idx.to(device)
+    st_kern = initial_state.index_select(0, keep_idx) if initial_state is not None else None
+    return cu_kern, st_kern, keep, keep_idx
 
 
 def _build_non_spec_chunked_prefill_metadata(
@@ -201,7 +203,7 @@ def _build_non_spec_chunked_prefill_metadata(
     num_decodes = sum(1 for seq_start, seq_end in zip(cu_seqlens_host, cu_seqlens_host[1:]) if seq_end - seq_start == 1)
     # Pre-compute compact cu_seqlens for AscendC kernels so each layer
     # can reuse them instead of calling _compact_empty_segments again.
-    cu_seqlens_kern, _, keep_meta = _compact_empty_segments(cu_seqlens_host, None, device=device)
+    cu_seqlens_kern, _, keep_meta, keep_idx = _compact_empty_segments(cu_seqlens_host, None, device=device)
     if keep_meta is None:
         cu_seqlens_kern = None
     else:
@@ -219,6 +221,7 @@ def _build_non_spec_chunked_prefill_metadata(
         num_decodes=num_decodes,
         cu_seqlens_kern=cu_seqlens_kern,
         keep_meta=keep_meta,
+        keep_idx=keep_idx,
     )
 
 

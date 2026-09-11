@@ -360,7 +360,7 @@ class SequenceRowParallelOp(CustomRowParallelOp):
             x = F.pad(x, (0, 0, 0, pad_size))
 
         world_size = self.layer.tp_size
-        hcom_name = get_tp_group().device_group._get_backend(torch.device("npu")).get_hccl_comm_name(self.layer.tp_rank)
+        hcom_name = get_tp_group().device_group._get_backend(torch.device("npu")).get_hccl_comm_name(torch.distributed.get_rank())
 
         from vllm.model_executor.layers.linear import UnquantizedLinearMethod
 

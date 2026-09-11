@@ -1094,7 +1094,6 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         else:
             aclgraph_runtime_mode = CUDAGraphMode.NONE
             batch_descriptor = None
-
         if aclgraph_runtime_mode == CUDAGraphMode.FULL:
             # TODO: Due to the inconsistency between the proposer `dispatcher` and model runner, this padding
             # should have been done in model runner but not. For example, at prefill stage, target model
@@ -1440,11 +1439,11 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                         # then remove dummy sampling rows before grouping them by
                         # request for Markov decoding.
                         raw_logits = raw_logits[:num_indices]
-                    logits = raw_logits.view(-1, self.num_speculative_tokens, raw_logits.shape[-1])
+                    logits = raw_logits.view(-1, _step_k, raw_logits.shape[-1])
                     num_blk = logits.shape[0]
                     draft_token_ids = self._dspark_draft_buffer[:num_blk]
                     draft_token_ids[:, 0].copy_(self._dspark_seed_buffer[:num_blk])
-                    for idx in range(self.num_speculative_tokens):
+                    for idx in range(_step_k):
                         markov_emb = self.model.markov_embed(draft_token_ids[:, idx])
                         logits_bias = self.model.markov_bias(markov_emb)
                         logits[:, idx].add_(logits_bias)
@@ -1462,9 +1461,9 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 draft_token_ids = logits.argmax(dim=-1)
 
         # Early exit if there is only one draft token to be generated.
-        if self.num_speculative_tokens == 1 or self.parallel_drafting:
+        if _step_k == 1 or self.parallel_drafting:
             if self.method == "dspark":
-                return draft_token_ids[:, 1:]
+                return draft_token_ids[:, 1 : 1 + _step_k]
             else:
                 # [batch_size, _step_k]
                 return draft_token_ids.view(-1, _step_k)

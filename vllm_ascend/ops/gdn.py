@@ -198,6 +198,9 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
             activation_num = 1 if self.activation else 0
             spec_causal_conv1d_meta = attn_metadata.spec_decode_metadata.spec_causal_conv1d
             spec_query_start_loc_device = spec_causal_conv1d_meta.query_start_loc
+            _num_accepted = spec_causal_conv1d_meta.num_accepted_tokens
+            _spec_lens = spec_query_start_loc_device[1:] - spec_query_start_loc_device[:-1]
+            _num_accepted = torch.clamp(_num_accepted, max=_spec_lens)
             output_spec = torch.empty_like(mixed_qkv_spec)
             torch.ops._C_ascend.npu_causal_conv1d_custom(
                 output_spec,
@@ -208,7 +211,7 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                 query_start_loc_opt=spec_query_start_loc_device,
                 cache_indices_opt=spec_causal_conv1d_meta.cache_indices,
                 initial_state_mode_opt=None,
-                num_accepted_tokens_opt=spec_causal_conv1d_meta.num_accepted_tokens,
+                num_accepted_tokens_opt=_num_accepted,
                 activation_mode=activation_num,
                 pad_slot_id=PAD_SLOT_ID,
                 run_mode=1,
@@ -354,7 +357,7 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                 scale=key_spec.shape[-1] ** -0.5,
                 actual_seq_lengths=actual_seq_lengths,
                 ssm_state_indices=spec_state_indices_tensor.flatten(),
-                num_accepted_tokens=spec_causal_conv1d_meta.num_accepted_tokens.to(torch.int32),
+                num_accepted_tokens=_num_accepted.to(torch.int32),
             ).unsqueeze(0)
         else:
             core_attn_out_spec, last_recurrent_state = None, None

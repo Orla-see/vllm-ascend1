@@ -651,6 +651,7 @@ class NPUModelRunner(GPUModelRunner):
         self.num_discarded_requests = 0
 
         self._dsd_capture_num_reqs: int | None = None
+        self._dsd_capture_step_k: int | None = None
 
     def _get_drafter(self):
         return get_spec_decode_method(self.speculative_config.method, self.vllm_config, self.device, self)
@@ -1997,13 +1998,6 @@ class NPUModelRunner(GPUModelRunner):
                     force_eager=self.model_config.enforce_eager,
                     num_encoder_reqs=len(scheduler_output.scheduled_encoder_inputs),
                 )
-                if num_reqs > 10:
-                    logger.warning(
-                        "DSD-TS3: before forward/replay mode=%s nt_pad=%d "
-                        "nr_pad=%s ts=%.3f",
-                        cudagraph_mode, batch_desc.num_tokens,
-                        batch_desc.num_reqs, time.perf_counter())
-
                 if logger.isEnabledFor(logging.DEBUG):
                     logger.debug(
                         "Running batch with cudagraph_mode: %s, batch_descriptor: %s, "
@@ -2117,7 +2111,6 @@ class NPUModelRunner(GPUModelRunner):
                     num_scheduled_tokens_np=num_scheduled_tokens_np,
                     cascade_attn_prefix_lens=cascade_attn_prefix_lens,
                 )
-
                 self._sanitize_placeholder_input_ids_for_forward(
                     scheduler_output,
                     num_tokens_padded,
@@ -2186,10 +2179,6 @@ class NPUModelRunner(GPUModelRunner):
             hidden_states = self._model_forward(
                 num_tokens_padded, input_ids, positions, intermediate_tensors, inputs_embeds, **model_kwargs
             )
-        if num_reqs > 10:
-            logger.warning(
-                "DSD-TS4: after forward/replay mode=%s ts=%.3f",
-                cudagraph_mode, time.perf_counter())
         with record_function_or_nullcontext("post process"):
             aux_hidden_states = None
             if self.use_aux_hidden_state_outputs:
@@ -2260,7 +2249,7 @@ class NPUModelRunner(GPUModelRunner):
             deferred_state_corrections_fn()
         return None
 
-    @torch.inference_mode()
+
     def sample_tokens(
         self, grammar_output: "GrammarOutput | None"
     ) -> ModelRunnerOutput | AsyncModelRunnerOutput | IntermediateTensors:
@@ -2880,13 +2869,6 @@ class NPUModelRunner(GPUModelRunner):
             if force_uniform_decode is None
             else force_uniform_decode
         )
-        if num_reqs > 10:
-            logger.warning(
-                "DSD-PROBE1: nt=%d nr=%d is_all_decode=%s uniform=%s "
-                "max_sched=%s resolve_ql=%s",
-                num_tokens, num_reqs, is_all_decode, uniform_decode,
-                max_num_scheduled_tokens,
-                self._resolve_uniform_query_len(num_tokens, num_reqs))
         # Encoder-decoder models only support CG for decoder_step > 0 (no enc_output
         # is present). Also, chunked-prefill is disabled, so batch are uniform.
         has_encoder_output = self.model_config.is_encoder_decoder and num_encoder_reqs > 0
@@ -2917,13 +2899,6 @@ class NPUModelRunner(GPUModelRunner):
             )
 
         cudagraph_mode, batch_descriptor = dispatch_cudagraph(num_tokens_padded, use_cascade_attn or has_encoder_output)
-        if num_reqs > 10:
-            logger.warning(
-                "DSD-PROBE2: nt=%d nr=%d mode=%s desc_nt=%s desc_bs=%s "
-                "desc_uniform=%s",
-                num_tokens, num_reqs, cudagraph_mode,
-                batch_descriptor.num_tokens, batch_descriptor.num_reqs,
-                batch_descriptor.uniform)
         num_tokens_padded = batch_descriptor.num_tokens
         if enable_sp(self.vllm_config):
             assert batch_descriptor.num_tokens % self.vllm_config.parallel_config.tensor_parallel_size == 0, (
@@ -2933,12 +2908,6 @@ class NPUModelRunner(GPUModelRunner):
         # across ranks
         should_ubatch, num_tokens_across_dp = False, None
         if self.vllm_config.parallel_config.data_parallel_size > 1:
-            if num_reqs > 10:
-                logger.warning(
-                    "DSD-TS1: before _sync_metadata_across_dp nt=%d nr=%d "
-                    "mode=%s ts=%.3f",
-                    num_tokens_padded, num_reqs, cudagraph_mode,
-                    time.perf_counter())
             _, num_tokens_across_dp, synced_cudagraph_mode = self._sync_metadata_across_dp(
                 num_tokens=num_tokens_padded,
                 cudagraph_mode=cudagraph_mode,
@@ -2947,12 +2916,6 @@ class NPUModelRunner(GPUModelRunner):
                                   or oproj_tp_enable()
                                   or embedding_tp_enable()),
             )
-            if num_reqs > 10:
-                logger.warning(
-                    "DSD-TS2: after _sync_metadata_across_dp synced_mode=%s "
-                    "nt_pad=%d ts=%.3f",
-                    synced_cudagraph_mode, num_tokens_padded,
-                    time.perf_counter())
 
             # Extract DP padding if there is any
             if num_tokens_across_dp is not None:
@@ -2980,13 +2943,6 @@ class NPUModelRunner(GPUModelRunner):
                     f"DSD-DP nt desync: rank{dp_rank} "
                     f"num_tokens_padded={num_tokens_padded} "
                     f"across_dp[rank]={_across_dp_rank} mode={cudagraph_mode}")
-            if num_reqs > 10 and self.dp_size > 1:
-                logger.warning(
-                    "DSD-PROBE3: synced_mode=%s nt_padded=%d "
-                    "across_dp=%s dp_rank=%d",
-                    synced_cudagraph_mode, num_tokens_padded,
-                    num_tokens_across_dp.tolist() if num_tokens_across_dp is not None else None,
-                    self.parallel_config.data_parallel_rank)
         cudagraph_stats = None
         if self.vllm_config.observability_config.cudagraph_metrics:
             cudagraph_stats = CUDAGraphStat(
@@ -3384,6 +3340,7 @@ class NPUModelRunner(GPUModelRunner):
         flow tracked. _dummy_run reads _dsd_capture_num_reqs to build a
         cell-specific dummy batch; None (PIECEWISE / non-DSD) -> original."""
         self._dsd_capture_num_reqs = desc.num_reqs
+        self._dsd_capture_step_k = desc.num_tokens // desc.num_reqs - 1
         try:
             return super()._warmup_and_capture(
                 desc,
@@ -3395,6 +3352,7 @@ class NPUModelRunner(GPUModelRunner):
             )
         finally:
             self._dsd_capture_num_reqs = None
+            self._dsd_capture_step_k = None
 
     @torch.inference_mode()
     def _dummy_run(
@@ -3886,7 +3844,6 @@ class NPUModelRunner(GPUModelRunner):
                 self.model = self.load_lora_model(self.model, self.vllm_config, self.device)
         self.model_memory_usage = m.consumed_memory
         logger.info("Loading model weights took %.4f GB", m.consumed_memory / float(2**30))
-
         get_offloader().post_init()
 
         mm_config = self.model_config.multimodal_config

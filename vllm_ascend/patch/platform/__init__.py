@@ -50,6 +50,8 @@ import vllm_ascend.patch.platform.patch_kv_delivery_preemption  # noqa
 import vllm_ascend.patch.platform.patch_balance_schedule  # noqa
 # DSD: align verify K_prev across DP ranks (after balance installs BalanceScheduler)
 import vllm_ascend.patch.platform.patch_dsd_dp  # noqa
+# DSD: tier-aware lookahead (after dsd_dp)
+import vllm_ascend.patch.platform.patch_scheduler  # noqa
 
 # Must follow the Scheduler class swap so AsyncScheduler inherits it.
 import vllm_ascend.patch.platform.patch_async_scheduler  # noqa

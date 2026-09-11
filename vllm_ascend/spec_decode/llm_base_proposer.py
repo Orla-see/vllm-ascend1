@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 import copy
+import os
 from collections.abc import Callable
 from contextlib import AbstractContextManager, nullcontext
 from functools import partial
@@ -70,6 +71,10 @@ _PREPARE_INPUTS_BLOCK_SIZE = 4
 
 
 # split hidden states along dimension of sequence
+# Skip the K0 keep-alive draft forward entirely (fix B experiment).
+_dsd_k0_skip = int(os.environ.get("VLLM_DSPARK_K0_SKIP", "0"))
+
+
 def split_inputs_tp_to_sp(hidden_states, out):
     # tp and sp share the same group
     group = get_tp_group()
@@ -1028,8 +1033,11 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             else self.num_speculative_tokens
         )
         _dsd_k0 = _scheduled_k == 0
-        _step_k = _scheduled_k if _scheduled_k > 0 else self.num_speculative_tokens
-
+        _step_k = _scheduled_k if _scheduled_k > 0 else 1  # K=0 keep-alive: minimal draft step
+        if _dsd_k0 and _dsd_k0_skip:
+            return torch.empty(
+                (batch_size, 0), dtype=torch.int64, device=self.device
+            )
         if token_indices_to_sample is None:
             token_indices_to_sample = common_attn_metadata.query_start_loc[1:] - 1
 

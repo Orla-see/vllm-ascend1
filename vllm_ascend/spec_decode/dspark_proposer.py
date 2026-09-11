@@ -270,14 +270,18 @@ class AscendDSparkProposer(AscendDflashProposer):
         long_seq_metadata=None,
         num_prefill_reqs=0,
         num_decode_reqs=0,
+        _step_k: int | None = None,
     ) -> tuple[int, torch.Tensor, CommonAttentionMetadata, tuple[Any, Any] | None]:
-        # The initial input token of markovHead is the next token
+        # Dynamic-K: honor the scheduler's _step_k, fall back to maxK.
+        _k = _step_k if _step_k is not None else self.num_speculative_tokens
+        num_query_per_req = _k if self.sample_from_anchor else (1 + _k)
+        assert _k <= self.num_speculative_tokens
         n = next_token_ids.shape[0]
         self._dspark_seed_buffer[:n].copy_(next_token_ids)
         self._dspark_seed_buffer[n:].fill_(0)
         batch_size = cad.num_reqs
-        num_query_total = batch_size * self.num_query_per_req
-        num_sample_total = batch_size * self.num_speculative_tokens
+        num_query_total = batch_size * num_query_per_req
+        num_sample_total = batch_size * _k
         has_num_rejected = num_rejected_tokens_gpu is not None
         primary_gid = getattr(self, "kv_cache_gid", 0)
         self._per_group_block_table_buffers = {
@@ -326,8 +330,8 @@ class AscendDSparkProposer(AscendDflashProposer):
                 # Scalars
                 parallel_drafting_token_id=self.parallel_drafting_token_id,
                 block_size=kernel_block_size,
-                num_query_per_req=self.num_query_per_req,
-                num_speculative_tokens=self.num_speculative_tokens,
+                num_query_per_req=num_query_per_req,
+                num_speculative_tokens=_k,
                 total_input_tokens=self._dflash_num_context,
                 batch_size=batch_size,
                 HAS_NUM_REJECTED=has_num_rejected,
@@ -342,21 +346,21 @@ class AscendDSparkProposer(AscendDflashProposer):
         if has_num_rejected:
             effective_seq_lens = effective_seq_lens - num_rejected_tokens_gpu
 
-        cad.query_start_loc = self.arange_dflash[: batch_size + 1] * self.num_query_per_req
-        cad.seq_lens = effective_seq_lens + self.num_query_per_req
+        cad.query_start_loc = self.arange_dflash[: batch_size + 1] * num_query_per_req
+        cad.seq_lens = effective_seq_lens + num_query_per_req
         cad.query_start_loc_cpu = (
-            torch.from_numpy(self.token_arange_np[: batch_size + 1]).clone() * self.num_query_per_req
+            torch.from_numpy(self.token_arange_np[: batch_size + 1]).clone() * num_query_per_req
         ).to(torch.int32)
 
         if hasattr(cad, "actual_seq_lengths_q"):
-            cad.actual_seq_lengths_q = [self.num_query_per_req] * batch_size
+            cad.actual_seq_lengths_q = [num_query_per_req] * batch_size
         if hasattr(cad, "decode_token_per_req"):
-            cad.decode_token_per_req = self.num_query_per_req
+            cad.decode_token_per_req = num_query_per_req
 
         cad.num_actual_tokens = num_query_total
         cad.num_input_tokens = num_query_total
-        cad.max_query_len = self.num_query_per_req
-        cad.max_seq_len = cad.max_seq_len + self.num_query_per_req
+        cad.max_query_len = num_query_per_req
+        cad.max_seq_len = cad.max_seq_len + num_query_per_req
         cad.slot_mapping = self._per_group_query_slot_mapping_buffers[primary_gid][:num_query_total]
         cad.positions = self.positions  # this would be sliced in attention backend
         if hasattr(self.model, "get_draft_attn_causal"):

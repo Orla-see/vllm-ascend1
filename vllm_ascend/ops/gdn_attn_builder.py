@@ -488,6 +488,7 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
         common_attn_metadata: CommonAttentionMetadata,
         spec_sequence_masks_cpu: torch.Tensor,
         num_accepted_tokens: torch.Tensor | None,
+        per_step_k: int | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         """Advance stateful spec-width prompt chunks through live spec inputs.
 
@@ -502,6 +503,7 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
         if is_prefilling is None or seq_lens_cpu is None or num_accepted_tokens is None:
             return spec_sequence_masks_cpu, num_accepted_tokens
 
+        _query_per_req = (per_step_k + 1) if per_step_k is not None else (self.num_spec + 1)
         # Common metadata tensors can include graph padding; only leading rows
         # correspond to requests represented by the runtime spec mask.
         num_reqs = min(
@@ -515,7 +517,7 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
         fold = (
             is_prefilling
             & ~spec_sequence_masks_cpu
-            & (query_lens_cpu == self.num_spec + 1)
+            & (query_lens_cpu == _query_per_req)
             & (seq_lens_cpu > query_lens_cpu)
         )
         fold_indices = fold.nonzero(as_tuple=True)[0]
@@ -525,7 +527,7 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
         spec_sequence_masks_cpu = spec_sequence_masks_cpu.clone()
         spec_sequence_masks_cpu[fold_indices] = True
         num_accepted_tokens = num_accepted_tokens.clone()
-        num_accepted_tokens[fold_indices.to(num_accepted_tokens.device)] = self.num_spec + 1
+        num_accepted_tokens[fold_indices.to(num_accepted_tokens.device)] = _query_per_req
         return spec_sequence_masks_cpu, num_accepted_tokens
 
     def build(  # type: ignore[override]
@@ -564,10 +566,15 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
                 0,
                 out=spec_sequence_masks_cpu,
             )
+            _per_step_k: int = self.num_spec
+            _spec_mask_indices = spec_sequence_masks_cpu.nonzero(as_tuple=True)[0]
+            if _spec_mask_indices.numel() > 0:
+                _per_step_k = int(num_decode_draft_tokens_cpu[_spec_mask_indices[0]].item())
             spec_sequence_masks_cpu, num_accepted_tokens = self._fold_spec_sized_prefill_chunks_into_spec(
                 m,
                 spec_sequence_masks_cpu,
                 num_accepted_tokens,
+                per_step_k=_per_step_k,
             )
             num_spec_decodes = spec_sequence_masks_cpu.sum().item()
             if num_spec_decodes == 0:
@@ -620,7 +627,7 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
 
             if num_prefills == 0 and num_decodes == 0:
                 spec_token_size = min(
-                    num_spec_decodes * (self.num_spec + 1),
+                    num_spec_decodes * (_per_step_k + 1),
                     query_start_loc_cpu[-1].item(),
                 )
                 spec_token_indx = torch.arange(
@@ -634,7 +641,7 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
                     device=query_start_loc.device,
                 )
                 spec_state_indices_tensor = torch.index_select(
-                    block_table_tensor[:, : self.num_spec + 1],
+                    block_table_tensor[:, : _per_step_k + 1],
                     0,
                     spec_sequence_indices,
                 )
@@ -654,7 +661,7 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
                 spec_token_indx = index[num_non_spec_tokens:]
 
                 spec_state_indices_tensor = torch.index_select(
-                    block_table_tensor[:, : self.num_spec + 1],
+                    block_table_tensor[:, : _per_step_k + 1],
                     0,
                     spec_sequence_indices,
                 )
@@ -794,11 +801,20 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
             spec_batch_size = m.num_reqs
 
             self.spec_state_indices_tensor[spec_batch_size:].fill_(NULL_BLOCK_ID)
-            self.spec_state_indices_tensor[:num_spec_decodes].copy_(
+            # With a per-batch-size K table the source width follows the
+            # active tier; pad the remaining columns with NULL slots.
+            src_state_width = spec_state_indices_tensor.size(1)
+            self.spec_state_indices_tensor[:num_spec_decodes, :src_state_width].copy_(
                 spec_state_indices_tensor,
                 non_blocking=True,
             )
-            spec_state_indices_tensor = self.spec_state_indices_tensor[:spec_batch_size]
+            if src_state_width < self.spec_state_indices_tensor.size(1):
+                self.spec_state_indices_tensor[
+                    :num_spec_decodes, src_state_width:
+                ].fill_(NULL_BLOCK_ID)
+            spec_state_indices_tensor = self.spec_state_indices_tensor[
+                :spec_batch_size, :src_state_width
+            ]
             spec_state_indices_tensor[num_spec_decodes:].fill_(NULL_BLOCK_ID)
 
             self.spec_sequence_masks[:num_spec_decodes].copy_(

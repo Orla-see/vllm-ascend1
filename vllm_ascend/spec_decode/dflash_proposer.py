@@ -173,7 +173,15 @@ class AscendDflashProposer(AscendEagleProposer):
 
         if not self.use_cuda_graph:
             aclgraph_runtime_mode = CUDAGraphMode.NONE
-        num_query_per_req = 1 + self.num_speculative_tokens
+        # DSD 2-D capture: the cell's K comes from the runner side-channel.
+        # K=0 cells capture no drafter graph: the runtime keep-alive forward
+        # (2 queries/req) matches no catalog key and falls back to eager.
+        step_k = getattr(self.runner, "_dsd_capture_step_k", None)
+        if step_k is None:
+            step_k = self.num_speculative_tokens
+        if step_k == 0:
+            return
+        num_query_per_req = 1 + step_k
         num_query_total = num_reqs * num_query_per_req
 
         context_positions = self._context_positions_buffer[:num_input_tokens]
@@ -241,11 +249,12 @@ class AscendDflashProposer(AscendEagleProposer):
                 self._runnable(
                     num_input_tokens=num_input_tokens,
                     batch_size=num_reqs,
-                    token_indices_to_sample=self.token_indices_to_sample[: num_reqs * self.num_speculative_tokens],
+                    token_indices_to_sample=self.token_indices_to_sample[: num_reqs * step_k],
                     target_positions=self._get_positions(num_input_tokens),
                     inputs_embeds=None,
                     multi_steps_attn_metadata=multi_steps_attn_metadata,
                     num_tokens=num_input_tokens,
+                    _step_k=step_k,
                 )
 
             forward_context = get_forward_context()

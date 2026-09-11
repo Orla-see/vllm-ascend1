@@ -37,19 +37,18 @@ def precompute_and_store_context_kv(
         k_norm_layer = self.layers[i].self_attn.k_norm
         all_k_normed[i] = k_norm_layer(all_k[i])
 
-    # --- Fused RoPE across all layers ---
-    # View as [L * num_ctx, kv] so RoPE sees one big batch (no copy).
-    # In-place RoPE: pass K as the "query" arg with key=None.
-    all_k_flat = all_k_normed.view(L * num_ctx, kv)
-    positions_repeated = context_positions.repeat(L)
-    tmpv = all_k_flat.clone()
-    self.layers[0].self_attn.rotary_emb(positions_repeated, all_k_flat, tmpv)
+    # --- Fused RoPE across all layers, applied one layer at a time ---
+    # Per-layer calls keep the temp buffer at num_ctx * kv elements.
+    for i in range(L):
+        k_flat = all_k_normed[i].view(num_ctx, kv)
+        tmpv = k_flat.clone()
+        self.layers[0].self_attn.rotary_emb(context_positions, k_flat, tmpv)
 
     if context_slot_mapping is None:
         return
 
     # --- Per-layer cache insert ---
-    all_k_final = all_k_flat.view(L, num_ctx, nkv, hd)
+    all_k_final = all_k_normed
     per_layer = isinstance(context_slot_mapping, (list, tuple))
     for i in range(L):
         slot_mapping = context_slot_mapping[i] if per_layer else context_slot_mapping

@@ -10,8 +10,6 @@ import torch
 from vllm.triton_utils import tl, triton
 
 
-@triton.heuristics({"HAS_BIAS": lambda args: args["B"] is not None})
-@triton.heuristics({"HAS_Z": lambda args: args["Z"] is not None})
 @triton.jit(do_not_specialize=["stride_x_row", "stride_y_row", "stride_z_row", "M", "N", "eps"])
 def _layer_norm_fwd_1pass_kernel_npu(
     X,  # pointer to the input
@@ -29,10 +27,10 @@ def _layer_norm_fwd_1pass_kernel_npu(
     eps,  # epsilon to avoid division by zero
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
-    HAS_BIAS: tl.constexpr,
-    HAS_Z: tl.constexpr,
     NORM_BEFORE_GATE: tl.constexpr,
     IS_RMS_NORM: tl.constexpr,
+    HAS_BIAS: tl.constexpr,
+    HAS_Z: tl.constexpr,
 ):
     # Map the program id to the row of X and Y it should compute.
     pid_m = tl.program_id(0)
@@ -143,6 +141,13 @@ def layer_norm_fwd_npu(
     # Choose BLOCK_M: e.g., 16, 32, 64 — depends on NPU vector core capacity
     BLOCK_M = 64  # Tune this based on your NPU's register/shared memory
 
+    # Compute heuristics explicitly instead of using @triton.heuristics,
+    # which can cause MLIR "Function argument index out of range" in
+    # ast_to_ttir when heuristic params are not accounted for in the
+    # C++ compiler's parameter indexing.
+    has_bias = bias is not None
+    has_z = z is not None
+
     # Now grid is (num blocks over M, num groups)
     grid = (triton.cdiv(M, BLOCK_M), ngroups)
     _layer_norm_fwd_1pass_kernel_npu[grid](
@@ -161,8 +166,9 @@ def layer_norm_fwd_npu(
         eps,
         BLOCK_M=BLOCK_M,
         BLOCK_N=BLOCK_N,
+        HAS_BIAS=has_bias,
+        HAS_Z=has_z,
         NORM_BEFORE_GATE=norm_before_gate,
         IS_RMS_NORM=is_rms_norm,
-        # Remove multibuffer if not needed
     )
     return out, mean, rstd

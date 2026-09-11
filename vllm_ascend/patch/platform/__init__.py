@@ -46,6 +46,8 @@ if os.getenv("DYNAMIC_EPLB", "false").lower() in ("true", "1") or os.getenv("EXP
 import vllm_ascend.patch.platform.patch_balance_schedule  # noqa
 # DSD: align verify K_prev across DP ranks (after balance installs BalanceScheduler)
 import vllm_ascend.patch.platform.patch_dsd_dp  # noqa
+# DSD: tier-aware lookahead (after dsd_dp)
+import vllm_ascend.patch.platform.patch_scheduler  # noqa
 
 import vllm_ascend.patch.platform.patch_kv_cache_coordinator  # noqa
 import vllm_ascend.patch.platform.patch_speculative_config  # noqa

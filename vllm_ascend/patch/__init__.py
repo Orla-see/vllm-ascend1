@@ -552,6 +552,23 @@
 #       profiling startup and per-step timing callbacks without monkey-patching
 #       `EngineCore` and the multiprocess entry point.
 #
+# ** 19a. File: platform/patch_scheduler.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `Scheduler.schedule` (base class)
+#   2. `Scheduler.schedule` on the class installed at the module name
+#      (BalanceScheduler after patch_balance_schedule)
+#    Why:
+#       num_lookahead_tokens is static (maxK + spec-mode extra), so K=0 tiers
+#       of a dynamic-SD batch-size table still reserve maxK+1 draft slots per
+#       request every step, evicting prefix-cache blocks and inflating KV
+#       pressure on no-draft steps.
+#    How：
+#       Wrap schedule() to set num_lookahead_tokens from
+#       dynamic_sd_lookup[len(running)] for the duration of the call, then
+#       restore it. Active only when VLLM_ASCEND_DSD_TIER_LOOKAHEAD=1.
+#    Related PR (if no, explain why):
+#       No, vllm-ascend-specific DSD scheduling.
+#
 # ** 20. File: platform/patch_speculative_config.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.config.speculative.SpeculativeConfig.hf_config_override`

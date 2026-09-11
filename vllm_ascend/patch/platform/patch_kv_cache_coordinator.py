@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM projectx
+import os
 import sys
 from collections.abc import Mapping
 from math import lcm
@@ -33,6 +34,8 @@ from vllm.v1.kv_cache_interface import (
 from vllm_ascend.core.single_type_kv_cache_manager import get_manager_for_kv_cache_spec
 
 USE_MULTI_GROUPS_KV_CACHE = True
+
+_pcache_no_eagle_drop = int(os.environ.get("VLLM_ASCEND_PCACHE_NO_EAGLE_DROP", "0"))
 
 _orig_get_kv_cache_coordinator = vllm.v1.core.kv_cache_coordinator.get_kv_cache_coordinator
 
@@ -321,6 +324,11 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
                     continue
 
                 use_eagle = idx in self.eagle_attn_group_indices and idx not in eagle_verified
+                if _pcache_no_eagle_drop:
+                    # Upper-bound probe: skip the eagle last-block drop on the
+                    # read path. Safe only when this request never drafts
+                    # (K=0 tier); all blocks stay cached either way.
+                    use_eagle = False
 
                 _max_length = curr_hit_length
                 if use_eagle and not isinstance(spec, MambaSpec):

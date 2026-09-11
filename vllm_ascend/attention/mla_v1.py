@@ -36,6 +36,7 @@ from vllm_ascend.attention.utils import (
     transdata,
     wait_for_kv_layer_from_connector,
 )
+
 from vllm_ascend.compilation.acl_graph import (
     get_draft_graph_params,
     get_draft_graph_prefill_params,
@@ -71,8 +72,6 @@ MLAPO_MAX_SUPPORTED_TOKENS = 1024
 # effective FIA batch close to the 32 A5 vector cores without exceeding it.
 MLA_FIA_SPLIT_TARGET_BATCH = 32
 MLA_FIA_SPLIT_MAX_INPUTS = 16
-
-
 def _mla_fia_num_splits(batch_size: int) -> int:
     """Return the fixed FIA split count for one decode graph batch bucket."""
     if batch_size <= 0:
@@ -1046,7 +1045,7 @@ class AscendMLAImpl(MLAAttentionImpl):
                         block_table = block_table[: len(actual_seq_lengths)]
                     seq_lens_list = seq_lens_list + [0] * (len(actual_seq_lengths) - len(seq_lens_list))
                 else:
-                    seq_lens_list = seq_lens_list + [0] * (num_tokens - len(seq_lens_list))
+                    seq_lens_list = seq_lens_list + [0] * (len(actual_seq_lengths) - len(seq_lens_list))
 
                 if fia_num_splits > 1:
                     assert fia_blocks_per_split is not None

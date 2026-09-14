@@ -8,6 +8,7 @@ from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, set_ascend_forward_context
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
+from vllm_ascend import dsd_probe
 from vllm_ascend.ops.triton.spec_decode.utils import copy_and_expand_dflash_and_dspark_inputs_kernel_single_grid
 from vllm_ascend.spec_decode.eagle_proposer import AscendEagleProposer
 
@@ -82,6 +83,7 @@ class AscendDflashProposer(AscendEagleProposer):
         _k = _step_k if _step_k is not None else self.num_speculative_tokens
         num_query_per_req = 1 + _k
         num_query_total = batch_size * num_query_per_req
+        dsd_probe.record(rk=_k, r_nt=num_query_total)
 
         self._dflash_num_context = num_context
         self._dflash_hidden_states[:num_context] = target_hidden_states

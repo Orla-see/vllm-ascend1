@@ -112,6 +112,7 @@ from vllm.v1.worker.ubatch_utils import (
 from vllm.v1.worker.utils import AttentionGroup, select_common_block_size
 
 # yapf: enable
+from vllm_ascend import dsd_probe
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.attention_v1 import AscendAttentionBackend, AscendAttentionState
 from vllm_ascend.attention.context_parallel.dsa_cp import AscendDSACPMetadataBuilder
@@ -301,6 +302,10 @@ class NPUModelRunner(GPUModelRunner):
 
         with _torch_cuda_wrapper():
             super().__init__(vllm_config, device)
+
+        # Worker env vars are filtered at spawn; gate the probe via config.
+        dsd_probe.set_enabled(
+            self.vllm_config.observability_config.cudagraph_metrics)
 
         self.pin_memory = PIN_MEMORY
 
@@ -2889,6 +2894,13 @@ class NPUModelRunner(GPUModelRunner):
             # (common cell) instead of the local num_reqs.
             self.cudagraph_dispatcher._dsd_num_reqs = (
                 dsd_num_reqs if dsd_num_reqs is not None else num_reqs)
+            dsd_probe.set_side("target")
+            dsd_probe.record(
+                t_sp=num_tokens,
+                t_nr=num_reqs,
+                t_uni=int(uniform_decode),
+                t_dec=int(is_all_decode),
+            )
             return self.cudagraph_dispatcher.dispatch(
                 num_tokens=num_tokens,
                 has_lora=has_lora,
@@ -2900,6 +2912,12 @@ class NPUModelRunner(GPUModelRunner):
 
         cudagraph_mode, batch_descriptor = dispatch_cudagraph(num_tokens_padded, use_cascade_attn or has_encoder_output)
         num_tokens_padded = batch_descriptor.num_tokens
+        dsd_probe.record(
+            t_nt=num_tokens,
+            t_pnt=batch_descriptor.num_tokens,
+            t_mode=str(cudagraph_mode).split(".")[-1][0],
+        )
+        dsd_probe.emit(self.vllm_config.parallel_config.rank)
         if enable_sp(self.vllm_config):
             assert batch_descriptor.num_tokens % self.vllm_config.parallel_config.tensor_parallel_size == 0, (
                 "Sequence parallelism requires num_tokens to be a multiple of tensor parallel size"
@@ -3340,7 +3358,9 @@ class NPUModelRunner(GPUModelRunner):
         flow tracked. _dummy_run reads _dsd_capture_num_reqs to build a
         cell-specific dummy batch; None (PIECEWISE / non-DSD) -> original."""
         self._dsd_capture_num_reqs = desc.num_reqs
-        self._dsd_capture_step_k = desc.num_tokens // desc.num_reqs - 1
+        self._dsd_capture_step_k = (
+            desc.num_tokens // desc.num_reqs - 1
+            if desc.num_reqs is not None else None)
         try:
             return super()._warmup_and_capture(
                 desc,

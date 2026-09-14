@@ -52,6 +52,8 @@ import vllm_ascend.patch.platform.patch_balance_schedule  # noqa
 import vllm_ascend.patch.platform.patch_dsd_dp  # noqa
 # DSD: tier-aware lookahead (after dsd_dp)
 import vllm_ascend.patch.platform.patch_scheduler  # noqa
+# DSD: dynamic-K mamba block accounting (after patch_mamba_manager + scheduler)
+import vllm_ascend.patch.platform.patch_dsd_mamba_k  # noqa
 
 # Must follow the Scheduler class swap so AsyncScheduler inherits it.
 import vllm_ascend.patch.platform.patch_async_scheduler  # noqa

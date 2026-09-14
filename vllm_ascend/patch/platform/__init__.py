@@ -48,6 +48,8 @@ import vllm_ascend.patch.platform.patch_balance_schedule  # noqa
 import vllm_ascend.patch.platform.patch_dsd_dp  # noqa
 # DSD: tier-aware lookahead (after dsd_dp)
 import vllm_ascend.patch.platform.patch_scheduler  # noqa
+# DSD: dynamic-K mamba block accounting (after patch_mamba_manager + scheduler)
+import vllm_ascend.patch.platform.patch_dsd_mamba_k  # noqa
 
 import vllm_ascend.patch.platform.patch_kv_cache_coordinator  # noqa
 import vllm_ascend.patch.platform.patch_speculative_config  # noqa

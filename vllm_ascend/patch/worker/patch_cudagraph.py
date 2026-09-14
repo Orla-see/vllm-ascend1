@@ -3,6 +3,7 @@ import math
 from vllm.config import CUDAGraphMode
 from vllm.forward_context import BatchDescriptor
 from vllm.v1.cudagraph_dispatcher import CudagraphDispatcher
+from vllm_ascend import dsd_probe
 from vllm_ascend.utils import enable_sp
 
 # bs step for the capture grid within each tier.
@@ -31,6 +32,7 @@ def _create_padded_batch_descriptor(
     if _is_dsd(self):
         # Catalog build path: explicit (num_tokens, num_reqs) cell.
         if num_reqs is not None:
+            dsd_probe.record(build_nt=num_tokens, build_nr=num_reqs, phase="capture")
             return BatchDescriptor(
                 num_tokens=num_tokens,
                 num_reqs=min(num_reqs, max_num_seqs),
@@ -49,6 +51,9 @@ def _create_padded_batch_descriptor(
             and actual_bs > 0
         ):
             query_len = num_tokens // actual_bs  # = 1 + K_prev
+            dsd_probe.record_side(
+                abs=actual_bs, ant=num_tokens, qlen=query_len,
+                selk=query_len - 1, phase="replay")
             full_keys = self.cudagraph_keys.get(CUDAGraphMode.FULL, set())
 
             def _mk(nt, nr, uni):
@@ -64,6 +69,7 @@ def _create_padded_batch_descriptor(
             exact_desc = _mk(num_tokens, actual_bs, True)
             if exact_desc in full_keys:
                 desc = exact_desc
+                dsd_probe.record_side(hit="exact")
             else:
                 # 2. Pad up to the smallest captured bs' >= actual_bs whose
                 #    query_len matches (dummy reqs fill bs' - actual_bs).
@@ -76,13 +82,33 @@ def _create_padded_batch_descriptor(
                         cand = _mk(bs_pad * query_len, bs_pad, True)
                         if cand in full_keys:
                             desc = cand
+                if desc is not None:
+                    dsd_probe.record_side(hit="pad")
 
             if desc is not None:
+                dsd_probe.record_side(
+                    selnt=desc.num_tokens,
+                    selnr=desc.num_reqs,
+                    seluni=int(desc.uniform),
+                    cap=desc.num_tokens,
+                    key=f"{desc.num_tokens}:{desc.num_reqs}:{int(desc.uniform)}",
+                    pad=desc.num_tokens - num_tokens,
+                )
                 return desc
 
             # 3. No FULL graph for this shape: PIECEWISE for this one step.
             num_tokens_padded = self._bs_to_padded_graph_size[num_tokens]
-            return _mk(num_tokens_padded, None, False)
+            desc = _mk(num_tokens_padded, None, False)
+            dsd_probe.record_side(
+                hit="pw",
+                selnt=desc.num_tokens,
+                selnr=desc.num_reqs,
+                seluni=int(desc.uniform),
+                cap=desc.num_tokens,
+                key=f"{desc.num_tokens}:{desc.num_reqs}:{int(desc.uniform)}",
+                pad=desc.num_tokens - num_tokens,
+            )
+            return desc
 
     # ---- original (non-DSD / mixed-batch) logic ----
     uniform_decode_query_len = self.uniform_decode_query_len
@@ -97,6 +123,19 @@ def _create_padded_batch_descriptor(
     else:
         uniform_decode = False
         num_reqs = min(num_tokens_padded, max_num_seqs)
+    spec = self.vllm_config.speculative_config
+    selk = spec.num_speculative_tokens if spec is not None else 0
+    dsd_probe.record_side(
+        hit=("pw1d" if _is_dsd(self) else "1d"),
+        selnt=num_tokens_padded,
+        selnr=num_reqs,
+        seluni=int(uniform_decode),
+        selk=selk,
+        cap=num_tokens_padded,
+        key=f"{num_tokens_padded}:{num_reqs}:{int(uniform_decode)}",
+        pad=num_tokens_padded - num_tokens,
+        phase="replay",
+    )
     return BatchDescriptor(
         num_tokens=num_tokens_padded,
         num_reqs=num_reqs,
@@ -153,10 +192,8 @@ def _dsd_2d_cells(self, uniform_decode_query_len: int):
             # dispatch gate. Align the bs grid so bs*qlen is always a TP
             # multiple (step = TP // gcd(qlen, TP)), making SP padding a no-op.
             sp_on = enable_sp(self.vllm_config)
-            # per-tier step: fine grid for the highest-K (win-window) tier, coarse elsewhere
-            step = (self.vllm_config.parallel_config.tensor_parallel_size
-                    // math.gcd(qlen, self.vllm_config.parallel_config.tensor_parallel_size)
-                    ) if sp_on else (2 if k_own == max(all_ks) else 8)
+            # Coarse grid: step 8 in every tier; off-grid bs pads up at dispatch.
+            step = 8
             bs_start = ((bs_lo + step - 1) // step) * step
             bs_vals = list(range(bs_start, bs_hi + 1, step))
             if not bs_vals or bs_vals[-1] != bs_hi:

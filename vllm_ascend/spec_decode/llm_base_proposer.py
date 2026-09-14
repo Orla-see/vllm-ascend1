@@ -41,6 +41,7 @@ from vllm.v1.spec_decode.utils import (
 )
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 
+from vllm_ascend import dsd_probe
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, set_ascend_forward_context
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
@@ -1034,6 +1035,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         )
         _dsd_k0 = _scheduled_k == 0
         _step_k = _scheduled_k if _scheduled_k > 0 else 1  # K=0 keep-alive: minimal draft step
+        dsd_probe.record(sk=_scheduled_k, pk=_step_k, dbs=batch_size)
         if _dsd_k0 and _dsd_k0_skip:
             return torch.empty(
                 (batch_size, 0), dtype=torch.int64, device=self.device
@@ -1081,10 +1083,12 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         uniform_decode = target_model_batch_desc.uniform
 
         if self.use_cuda_graph:
+            dsd_probe.set_side("draft")
             _, batch_descriptor = self.runner.cudagraph_dispatcher.dispatch(
                 num_tokens=num_tokens, uniform_decode=uniform_decode, has_lora=has_lora
             )
             num_input_tokens = batch_descriptor.num_tokens
+            dsd_probe.record(d_pnt=batch_descriptor.num_tokens)
         else:
             num_input_tokens = num_tokens
 
@@ -1099,6 +1103,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 num_tokens=num_input_tokens, uniform_decode=uniform_decode, has_lora=has_lora
             )
             num_input_tokens = batch_descriptor.num_tokens
+            dsd_probe.record(d_mode=str(aclgraph_runtime_mode).split(".")[-1][0])
         else:
             aclgraph_runtime_mode = CUDAGraphMode.NONE
             batch_descriptor = None
